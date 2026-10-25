@@ -12,9 +12,10 @@ import gleam/http/client as http_client
 import gleam/list
 import gleam/result
 import gleam/string
-import mist/router.{type Route}
-import mist/startup_server as startup_server
-import mist/http_server.{type HttpServer}
+import mist/router
+import mist.startup_server as startup_server
+import mist.http_server.{type HttpServer}
+import mist.http.middleware as http_middleware
 
 import gleammatrix/config as config_module
 import gleammatrix/mnesia_tables as mnesia_tables
@@ -56,51 +57,44 @@ fn init_server_with_config(config: config_module.Config) -> Result(ServerState, 
   )
   
   gleam/result.map(start_result, fn(http_server) {
-    init_and_start(config, http_server)
+    ServerState(
+      http_server: http_server,
+      node_id: config.node_id,
+      config: config
+    )
   })
 }
 
-/// Start HTTP server and create final ServerState
-fn init_and_start(config: config_module.Config, http_server: HttpServer) -> ServerState {
-  _ = init_vpc_binding(config)
-  
-  ServerState(
-    http_server: http_server,
-    node_id: config.node_id,
-    config: config
-  )
-}
-
 /// Setup HTTP routing middleware chain with error handling
-fn setup_routing_middleware(config: config_module.Config) -> List(Route) {
+fn setup_routing_middleware(config: config_module.Config) -> List(router.Route) {
   let error_handler = setup_error_handler()
   
   [
-    Route.get("/health"),
-    Route.get("/livez"),
-    Route.get("/readyz"),
+    router.Route.get("/health"),
+    router.Route.get("/livez"),
+    router.Route.get("/readyz"),
     
-    Route.post("/_matrix/client/r0/register"),
-    Route.post("/_matrix/client/r0/login"),
-    Route.get("/_matrix/client/v3/profile/{user_id}"),
-    Route.put("/_matrix/client/v3/profile/{user_id}"),
+    router.Route.post("/_matrix/client/r0/register"),
+    router.Route.post("/_matrix/client/r0/login"),
+    router.Route.get("/_matrix/client/v3/profile/{user_id}"),
+    router.Route.put("/_matrix/client/v3/profile/{user_id}"),
     
-    Route.post("/_matrix/client/v0/createRoom"),
-    Route.get("/_matrix/client/v3/rooms/{room_id}/messages"),
-    Route.post("/_matrix/client/v3/rooms/{room_id}/send/{event_type}/{txn_id}"),
+    router.Route.post("/_matrix/client/v0/createRoom"),
+    router.Route.get("/_matrix/client/v3/rooms/{room_id}/messages"),
+    router.Route.post("/_matrix/client/v3/rooms/{room_id}/send/{event_type}/{txn_id}"),
     
-    Route.post("/_matrix/federation/v1/query/user_devices/{user_id}"),
-    Route.post("/_matrix/federation/v1/send/{transaction_id}"),
-    Route.get("/_matrix/federation/v1/room/{room_id}/state/{event_id}"),
+    router.Route.post("/_matrix/federation/v1/query/user_devices/{user_id}"),
+    router.Route.post("/_matrix/federation/v1/send/{transaction_id}"),
+    router.Route.get("/_matrix/federation/v1/room/{room_id}/state/{event_id}"),
     
-    Route.any("/api/vpc/validation")
+    router.Route.any("/api/vpc/validation")
   ]
   |> gleam/list.map(fn(route) { add_error_middleware(route, error_handler) })
 }
 
 /// Configure custom error handling middleware for HTTP responses
-fn setup_error_handler() -> mist/http/middleware {
-  mist/middleware.response(
+fn setup_error_handler() -> http_middleware.Middleware {
+  http_middleware.response(
     status: 500,
     content_type: "application/json",
     body: io.json.encode({
@@ -112,12 +106,12 @@ fn setup_error_handler() -> mist/http/middleware {
 }
 
 /// Add error handling middleware to individual routes
-fn add_error_middleware(route: Route, error_handler: mist/http/middleware) -> Route {
-  route |> mist/router.with_middleware(error_handler)
+fn add_error_middleware(route: router.Route, error_handler: http_middleware.Middleware) -> router.Route {
+  route |> mist.router.with_middleware(error_handler)
 }
 
-/// Initialize Cloudflare Workers VPC validation binding
-fn init_vpc_binding(config: config_module.Config) -> Result(gleam/http/client, String) {
+/// Initialize Cloudflare Workers VPC validation binding (non-critical, returns Result)
+fn init_vpc_binding(config: config_module.Config) -> Result(String, String) {
   case gleam/string.starts_with(config.vpc_validation_endpoint, "https://") of
     False -> Error("Invalid VPC endpoint scheme: must use HTTPS protocol")
     
@@ -157,7 +151,7 @@ pub fn handle_shutdown(state: ServerState) -> Result(String, String) {
     io.println("⚠ Warning: Error closing Mnesia tables: " <> e)
   })
   
-  Ok("Shutdown completed gracefully after " <> int.to_string(mist/http_server.stop_ms(state.http_server)) <> "ms")
+  Ok("Shutdown completed gracefully after " <> int.to_string(mist.http_server.stop_ms(state.http_server)) <> "ms")
 }
 
 /// Generate comprehensive server identity response for federation metadata endpoints
@@ -174,23 +168,23 @@ fn generate_server_identity(config: config_module.Config) -> dict.Dict(String, S
 }
 
 /// Extract client identifier from HTTP request headers
-fn extract_client_identifier(request: mist/http/request) -> String {
-  mist/http.header("X-Forwarded-For", request) |> gleam/result.unwrap(request.client_ip)
+fn extract_client_identifier(request: mist.http.request) -> String {
+  mist.http.header("X-Forwarded-For", request) |> gleam/result.unwrap(request.client_ip)
 }
 
 /// Middleware to add CORS headers for cross-origin requests
-fn cors_middleware(allowed_origins: List(String), allow_methods: List(String)) -> mist/http/middleware {
-  mist/middleware.after(fn(response: mist/http/response, request: mist/http/request) -> Result(mist/http/response, mist/http/request) {
-    let origin = mist/http.header("Origin", request) |> gleam/result.unwrap("")
+fn cors_middleware(allowed_origins: List(String), allow_methods: List(String)) -> http_middleware.Middleware {
+  http_middleware.after(fn(response: mist.http.response, request: mist.http.request) -> Result(mist.http.response, mist.http.request) {
+    let origin = mist.http.header("Origin", request) |> gleam/result.unwrap("")
     
     case gleam/list.any(allowed_origins, fn(origin_url: String) -> Bool { 
       gleam/string.contains(origin, origin_url) || origin == "null"
     }) of
       True -> 
         let modified_response = response
-          |> mist/http.header("Access-Control-Allow-Origin", allowed_origins |> gleam/list.first() |> gleam/result.unwrap("*"))
-          |> mist/http.header("Access-Control-Allow-Methods", gleam/list.join(allow_methods, ", "))
-          |> mist/http.header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+          |> mist.http.header("Access-Control-Allow-Origin", allowed_origins |> gleam/list.first() |> gleam/result.unwrap("*"))
+          |> mist.http.header("Access-Control-Allow-Methods", gleam/list.join(allow_methods, ", "))
+          |> mist.http.header("Access-Control-Allow-Headers", "Content-Type, Authorization")
           
         Ok(modified_response)
         
