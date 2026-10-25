@@ -16,10 +16,11 @@ import gleam/result
 import gleam/string
 import mist/router.{type Route}
 import mist/startup_server as startup_server
+import mist/http_server.{type HttpServer}
 
-import gleam_matrix_server/config as config_module
-import mnesia_tables as mnesia_tables
-import utils as utils
+import gleammatrix/config as config_module
+import gleammatrix/mnesia_tables as mnesia_tables
+import gleammatrix/utils as utils
 
 // Error types for HTTP operations
 pub type ServerError {
@@ -32,9 +33,9 @@ pub type ServerError {
 // Server state management for graceful shutdown
 pub type ServerState {
   ServerState(
-    http_server: mist/http_server,
+    http_server: HttpServer,
     node_id: String,
-    config: gleam_matrix_server.config.Config
+    config: config_module.Config
   )
 }
 
@@ -44,9 +45,9 @@ pub fn main() -> Result(ServerState, ServerError) {
   case mnesia_tables.initialize_mnesia_table_schema() {
     Ok(_) -> 
       // Load configuration from environment variables
-      let config_result = gleam_matrix_server.config.load_config([])
+      let config_result = gleammatrix.config.load_config([])
       
-      case gleam_matrix_server.config.validate_config(config_result) {
+      case gleammatrix.config.validate_config(config_result) {
         Ok(config) ->
           // Setup routing middleware chain
           let routes = setup_routing_middleware(config)
@@ -113,7 +114,7 @@ pub fn main() -> Result(ServerState, ServerError) {
 }
 
 // Setup HTTP routing middleware chain with error handling
-fn setup_routing_middleware(config: gleam_matrix_server.config.Config) -> List(Route) {
+fn setup_routing_middleware(config: config_module.Config) -> List(Route) {
   let error_handler = setup_error_handler()
   
   // Build route list from all available endpoints
@@ -170,7 +171,7 @@ fn add_error_middleware(route: Route, error_handler: mist/http/middleware) -> Ro
 }
 
 // Initialize Cloudflare Workers VPC validation binding
-fn init_vpc_binding(config: gleam_matrix_server.config.Config) -> Result(gleam/http/client, String) {
+fn init_vpc_binding(config: config_module.Config) -> Result(gleam/http/client, String) {
   // Validate VPC endpoint URL format before attempting connection
   case string.starts_with(config.vpc_validation_endpoint, "https://") {
     False -> 
@@ -214,7 +215,7 @@ fn test_vpc_connection(client: gleam/http/client, endpoint: String) -> Result(St
 }
 
 // Route handlers for health check endpoints (liveness/readiness probes)
-fn handle_health_check(request: mist/http/request, params: dict.Dict(String, gleam/string)) -> Result(mist/http/response, mist/http/response) {
+fn handle_health_check(request: mist/http/request, params: dict.Dict(String, String)) -> Result(mist/http/response, mist/http/response) {
   let _ = request
   
   // Health checks should be lightweight and always return immediately
@@ -225,7 +226,7 @@ fn handle_health_check(request: mist/http/request, params: dict.Dict(String, gle
 }
 
 // Route handler for liveness probe (server process is alive)
-fn handle_liveness_probe(request: mist/http/request, params: dict.Dict(String, gleam/string)) -> Result(mist/http/response, mist/http/response) {
+fn handle_liveness_probe(request: mist/http/request, params: dict.Dict(String, String)) -> Result(mist/http/response, mist/http/response) {
   let _ = request
   let _ = params
   
@@ -236,19 +237,19 @@ fn handle_liveness_probe(request: mist/http/request, params: dict.Dict(String, g
 }
 
 // Route handler for readiness probe (server is ready to accept traffic)
-fn handle_readiness_probe(request: mist/http/request, params: dict.Dict(String, gleam/string)) -> Result(mist/http/response, mist/http/response) {
+fn handle_readiness_probe(request: mist/http/request, params: dict.Dict(String, String)) -> Result(mist/http/response, mist/http/response) {
   let _ = request
   let _ = params
   
   // Check if required tables are initialized before allowing traffic
   case mnesia_tables.get_table_status("user_profiles") {
-    ok(_) -> 
+    Ok(_) -> 
       Ok(mist/http/json_response(200, io.json.encode({
         {"status": "ready"},
         {"tables_initialized": true}
       })))
       
-    error(_) -> 
+    Error(_) -> 
       // Server not ready - tables still loading
       Ok(mist/http/json_response(503, io.json.encode({
         {"status": "not_ready"},
@@ -258,16 +259,16 @@ fn handle_readiness_probe(request: mist/http/request, params: dict.Dict(String, 
 }
 
 // Graceful shutdown handler for signal termination (SIGTERM/SIGINT)
-pub fn handle_shutdown(state: ServerState) -> Result(String, gleam/string) {
+pub fn handle_shutdown(state: ServerState) -> Result(String, String) {
   // Log shutdown initiation timestamp
   io.println("⏸️  Initiating graceful shutdown for node " <> state.node_id)
   
   // Close HTTP server connections cleanly
   case mnesia_tables.shutdown_mnesia_schema() {
-    ok(_) -> 
+    Ok(_) -> 
       io.println("✓ Mnesia tables closed successfully")
       
-    error(e) -> 
+    Error(e) -> 
       io.println("⚠ Warning: Error closing Mnesia tables: " <> e)
   }
   
@@ -280,7 +281,7 @@ fn request_timing_middleware(
   handler: mist/http/middleware_handler,
   metric_prefix: String
 ) -> mist/http/middleware {
-  mist/middleware.after(fn(response: mist/http/response) -> Result(mist/http/response, mist/http/request) {
+  mist/middleware.after(fn(response: mist/http/response, request: mist/http/request) -> Result(mist/http/response, mist/http/request) {
     // Add timing headers to response for debugging
     let timing = int.to_string(mist/http_server.last_request_time_ms())
     
@@ -290,7 +291,7 @@ fn request_timing_middleware(
 
 // Rate limiting middleware implementation (placeholder for Redis-backed variant)
 fn rate_limiting_middleware(
-  config: gleam_matrix_server.config.Config,
+  config: config_module.Config,
   key_prefix: String
 ) -> mist/http/middleware {
   mist/middleware.before(fn(request: mist/http/request) -> Result(mist/http/response, mist/http/request) {
@@ -299,11 +300,11 @@ fn rate_limiting_middleware(
     
     // Check rate limit counter (in-memory for development, Redis for production)
     case utils.get_rate_limit_status(config.rate_limit_max_requests, config.rate_limit_window_ms, key_prefix <> ":" <> client_id) {
-      ok(true) -> 
+      Ok(true) -> 
         // Within rate limits - allow request through
         Ok(request)
         
-      error(false) -> 
+      Error(false) -> 
         // Rate limit exceeded - reject with 429 Too Many Requests
         Err(mist/http/json_response(429, io.json.encode({
           {"error": "Rate limit exceeded"},
@@ -399,7 +400,7 @@ fn cors_middleware(allowed_origins: List(String), allow_methods: List(String)) -
 }
 
 // Generate comprehensive server identity response for federation metadata endpoints
-fn generate_server_identity(config: gleam_matrix_server.config.Config) -> dict.Dict(String, gleam/string) {
+fn generate_server_identity(config: config_module.Config) -> dict.Dict(String, String) {
   let port_str = int.to_string(config.matrix_port)
   
   dict.from_list([
@@ -412,7 +413,7 @@ fn generate_server_identity(config: gleam_matrix_server.config.Config) -> dict.D
 }
 
 // Middleware to log incoming requests (development/debug mode only)
-fn logging_middleware(config: gleam_matrix_server.config.Config, request_id: String, handler: mist/http/middleware_handler) -> mist/http/middleware {
+fn logging_middleware(config: config_module.Config, request_id: String, handler: mist/http/middleware_handler) -> mist/http/middleware {
   // Conditional logging based on environment (LOG_LEVEL=debug in production)
   case io.env("LOG_LEVEL") |> result.unwrap("info") {
     "debug" | "trace" -> 
@@ -467,7 +468,7 @@ fn handle_not_found(request: mist/http/request) -> Result(mist/http/response, mi
 }
 
 // Initialize application state with configuration validation
-pub fn initialize_application(config: gleam_matrix_server.config.Config) -> Result(gleam_matrix_server.ServerState, ServerError) {
+pub fn initialize_application(config: config_module.Config) -> Result(ServerState, ServerError) {
   case mnesia_tables.initialize_mnesia_table_schema() {
     Ok(_) -> 
       // Configuration validated during load_config call
@@ -484,10 +485,10 @@ pub fn initialize_application(config: gleam_matrix_server.config.Config) -> Resu
           
           // Start heartbeat scheduler for peer discovery
           case utils.start_cluster_heartbeat_scheduler(config) {
-            ok(_) -> 
+            Ok(_) -> 
               io.println("✓ Cluster heartbeat scheduler started")
               
-            error(e) -> 
+            Error(e) -> 
               io.println("⚠ Warning: Failed to start cluster scheduler: " <> e)
           }
           
@@ -500,7 +501,7 @@ pub fn initialize_application(config: gleam_matrix_server.config.Config) -> Resu
               io.println("○ Using local-only mode (no cluster coordination)")
           }
           
-          Ok(gleam_matrix_server.ServerState(
+          Ok(ServerState(
             http_server: http_server,
             node_id: config.node_id,
             config: config
@@ -516,24 +517,24 @@ pub fn initialize_application(config: gleam_matrix_server.config.Config) -> Resu
 }
 
 // Application state accessors for external modules
-pub fn get_server_node_id(state: gleam_matrix_server.ServerState) -> String {
+pub fn get_server_node_id(state: ServerState) -> String {
   state.node_id
 }
 
-pub fn get_server_config(state: gleam_matrix_server.ServerState) -> gleam_matrix_server.config.Config {
+pub fn get_server_config(state: ServerState) -> config_module.Config {
   state.config
 }
 
-pub fn get_http_server(state: gleam_matrix_server.ServerState) -> mist/http_server {
+pub fn get_http_server(state: ServerState) -> HttpServer {
   state.http_server
 }
 
 // Main entry point for running the Matrix server application
-pub fn run() -> Result(gleam_matrix_server.ServerState, ServerError) {
+pub fn run() -> Result(ServerState, ServerError) {
   // Load and validate configuration before starting
-  let config = gleam_matrix_server.config.load_config([])
+  let config = gleammatrix.config.load_config([])
   
-  case gleam_matrix_server.config.validate_config(config) {
+  case gleammatrix.config.validate_config(config) {
     Ok(validated_config) -> 
       initialize_application(validated_config)
       
