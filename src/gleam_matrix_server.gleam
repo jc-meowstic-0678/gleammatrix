@@ -13,9 +13,9 @@ import gleam/list
 import gleam/result
 import gleam/string
 import mist/router
-import mist.startup_server as startup_server
-import mist.http_server.{type HttpServer}
-import mist.http.middleware as http_middleware
+import mist/startup_server as startup_server
+import mist/http_server.{type HttpServer}
+import mist/http/middleware as http_middleware
 
 import gleammatrix/config as config_module
 import gleammatrix/mnesia_tables as mnesia_tables
@@ -94,14 +94,16 @@ fn setup_routing_middleware(config: config_module.Config) -> List(router.Route) 
 
 /// Configure custom error handling middleware for HTTP responses
 fn setup_error_handler() -> http_middleware.Middleware {
+  let body_dict = dict.from_list([
+    ["error", "Internal server error"],
+    ["status_code", int.to_string(500)],
+    ["message", "The requested operation could not be completed"]
+  ])
+  
   http_middleware.response(
     status: 500,
     content_type: "application/json",
-    body: io.json.encode({
-      {"error": "Internal server error"},
-      {"status_code": 500},
-      {"message": "The requested operation could not be completed"}
-    })
+    body: io.json.encode(body_dict)
   )
 }
 
@@ -112,19 +114,21 @@ fn add_error_middleware(route: router.Route, error_handler: http_middleware.Midd
 
 /// Initialize Cloudflare Workers VPC validation binding (non-critical, returns Result)
 fn init_vpc_binding(config: config_module.Config) -> Result(String, String) {
+  let client_config = http_client.config()
+    |> http_client.set_timeout_ms(5_000)
+    |> http_client.set_verify_tls(true)
+  
   case gleam/string.starts_with(config.vpc_validation_endpoint, "https://") of
     False -> Error("Invalid VPC endpoint scheme: must use HTTPS protocol")
     
     True -> 
-      let client_config = http_client.config()
-        |> http_client.set_timeout_ms(5_000)
-        |> http_client.set_verify_tls(true)
-        
-      case http_client.new_client(client_config) of
-        Ok(http_client_instance) -> 
-          test_vpc_connection(http_client_instance, config.vpc_validation_endpoint)
-          
+      let result = http_client.new_client(client_config)
+      
+      case result {
+        Ok(http_client_instance) -> test_vpc_connection(http_client_instance, config.vpc_validation_endpoint)
         Error(e) -> Error("Failed to create HTTP client for VPC binding: " <> e)
+      }
+  }
 }
 
 /// Test connectivity to Cloudflare Workers VPC validation endpoint
@@ -159,22 +163,22 @@ fn generate_server_identity(config: config_module.Config) -> dict.Dict(String, S
   let port_str = int.to_string(config.matrix_port)
   
   dict.from_list([
-    {"version", "1.0.0"},
-    {"matrix_version", "r0/v1"},
-    {"server", config.domain},
-    {"port", port_str},
-    {"features", io.json.encode(["v1", "capability.state_events"])}
+    ["version", "1.0.0"],
+    ["matrix_version", "r0/v1"],
+    ["server", config.domain],
+    ["port", port_str],
+    ["features", io.json.encode(["v1", "capability.state_events"])]
   ])
 }
 
 /// Extract client identifier from HTTP request headers
-fn extract_client_identifier(request: mist.http.request) -> String {
+fn extract_client_identifier(request: mist/http/request) -> String {
   mist.http.header("X-Forwarded-For", request) |> gleam/result.unwrap(request.client_ip)
 }
 
 /// Middleware to add CORS headers for cross-origin requests
 fn cors_middleware(allowed_origins: List(String), allow_methods: List(String)) -> http_middleware.Middleware {
-  http_middleware.after(fn(response: mist.http.response, request: mist.http.request) -> Result(mist.http.response, mist.http.request) {
+  http_middleware.after(fn(response: mist/http/response, request: mist/http/request) -> Result(mist/http/response, mist/http/request) {
     let origin = mist.http.header("Origin", request) |> gleam/result.unwrap("")
     
     case gleam/list.any(allowed_origins, fn(origin_url: String) -> Bool { 

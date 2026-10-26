@@ -1,10 +1,9 @@
+{ pkgs ? import /nix/var/nix/profiles/per-user/root/channels/nixpkgs {} }:
 
-  { pkgs ? import <nixpkgs> {} }:
-
-  pkgs.mkShell {
-    buildInputs = with pkgs; [
-      gleam
-      erlang
-      rebar3
-    ];
-  }
+pkgs.mkShell { 
+  buildInputs = with pkgs; [ 
+    gleam 
+    erlang 
+    rebar3 
+  ]; 
+}
