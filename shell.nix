@@ -1,4 +1,4 @@
-{ pkgs ? import /nix/var/nix/profiles/per-user/root/channels/nixpkgs {} }:
+{ pkgs ? import /nix/var/nix/profiles/default/channels/nixpkgs {} }:
 
 pkgs.mkShell { 
   buildInputs = with pkgs; [ 
