@@ -389,7 +389,6 @@ gleam check
 
 | Symptom | Likely Cause | Solution |
 |---------|--------------|----------|
-| `file 'nixpkgs' was not found` | Nix channel path incorrect | `export NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixpkgs` |
 | `AETHER_NODE not set` | Missing required env var | Set `AETHER_NODE=aether@your-server.example.com` before startup |
 | `Invalid peer format` | Peer list missing dots in FQDN | Ensure all peers contain dots: `node1.example.com` not `node1` |
 | `Cloudflared tunnel down` | Tunnel mode incorrect | Verify using **warp-routing** mode, NOT ingress service [2] |
